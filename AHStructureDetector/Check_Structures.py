@@ -13,6 +13,38 @@ import pickle
 from itertools import groupby
 import seaborn as sns
 import matplotlib.pyplot as plt
+
+
+def _load_extxyz(extxyz_file):
+    """Load an extxyz trajectory into the MDAnalysis interface used below."""
+    from ase.io import read
+    from MDAnalysis.coordinates.memory import MemoryReader
+
+    frames = read(extxyz_file, index=':')
+    if not isinstance(frames, list):
+        frames = [frames]
+    if not frames:
+        raise ValueError('The extxyz trajectory contains no frames: ' + extxyz_file)
+
+    symbols = frames[0].get_chemical_symbols()
+    positions = np.asarray([frame.positions for frame in frames], dtype=np.float32)
+    dimensions = np.asarray([frame.cell.cellpar() for frame in frames], dtype=np.float32)
+    times = np.asarray([frame.info.get('Time', frame.info.get('time', idx))
+                        for idx, frame in enumerate(frames)], dtype=float)
+    dt = float(times[1] - times[0]) if len(times) > 1 else 1.0
+    if np.any(np.diff(times) <= 0):
+        raise ValueError('extxyz frame times must increase monotonically in ps.')
+
+    trajectory = md.Universe.empty(
+        len(symbols), n_residues=1,
+        atom_resindex=np.zeros(len(symbols), dtype=int), trajectory=True)
+    trajectory.add_TopologyAttr('name', symbols)
+    trajectory.load_new(positions, format=MemoryReader, dimensions=dimensions, dt=dt)
+    for ts, time_ps in zip(trajectory.trajectory, times):
+        ts.time = time_ps
+    return trajectory, bool(np.all(frames[0].pbc))
+
+
 freud.parallel.set_num_threads(nthreads=os.cpu_count())
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # or any {'0', '1', '2'}
 
@@ -68,6 +100,7 @@ def Check_Structures(WorkDir=None, Salt=None, SystemName=None, SaveTrajectory=Tr
                                 in ps, only meaningful when CheckFullTrajectory 
                                 is True. This does not affect the choice of neural network.
         FileType                Sets the structure file type, either gro or g96.
+                                Use 'extxyz' to analyze an extxyz trajectory.
                                 
         Verbose                 Turns on higher logging verbosity when True.
         
@@ -221,14 +254,18 @@ def Check_Structures(WorkDir=None, Salt=None, SystemName=None, SaveTrajectory=Tr
         raise FileNotFoundError('Unable to load Structure Selector model from: ' + model_loc + ' (model not found).')
     model = tf.keras.models.load_model(model_loc)
     
-    # If note give, attempt to find system name based on the .trr file in the WorkDir
+    is_extxyz = FileType.lower() == 'extxyz'
+
+    # If not given, attempt to find system name based on the trajectory file.
     if SystemName is None:
         try:
             WorkDirFiles = os.listdir(WorkDir)
-            trr_file = [i for i in WorkDirFiles if i.endswith('.trr')][0]
-            SystemName = trr_file[:-4]
+            extension = '.extxyz' if is_extxyz else '.trr'
+            trajectory_file = [i for i in WorkDirFiles if i.endswith(extension)][0]
+            SystemName = trajectory_file[:-len(extension)]
         except:
-            raise Exception("Unable to find trajectory file (.trr) in given WorkDir. Try giving explicit SystemName.")
+            extension = '.extxyz' if is_extxyz else '.trr'
+            raise Exception("Unable to find trajectory file ({}) in given WorkDir. Try giving explicit SystemName.".format(extension))
     
     labels = ["Liquid","Rocksalt","Wurtzite","5-5","NiAs","Sphalerite","$\\beta$-BeO","AntiNiAs","CsCl"]
     map_dict = {0: "Liquid",
@@ -264,9 +301,13 @@ def Check_Structures(WorkDir=None, Salt=None, SystemName=None, SaveTrajectory=Tr
     mdpfile = os.path.join(WorkDir, SystemName + "." + 'mdp')
     
     # Check that the required files exist
-    if not os.path.isfile(trajfile):
+    if is_extxyz:
+        if not os.path.isfile(grofile):
+            raise FileNotFoundError('Unable to find extxyz trajectory: ' + grofile + ' (file not found).')
+        t, pbc_on = _load_extxyz(grofile)
+    elif not os.path.isfile(trajfile):
         raise FileNotFoundError('Unable to find trajectory output file: ' + trajfile + ' (file not found).')
-    if not os.path.isfile(grofile):
+    if not is_extxyz and not os.path.isfile(grofile):
         # If no gro file found with default name, search for others
         import glob
         list_of_gro_files = glob.glob(os.path.join(WorkDir,'*.' + FileType))
@@ -276,7 +317,9 @@ def Check_Structures(WorkDir=None, Salt=None, SystemName=None, SaveTrajectory=Tr
             raise FileNotFoundError('Unable to find initial system geometry file: ' + grofile + ' (file not found).')
         else:
             grofile = min(list_of_gro_files, key=os.path.getctime)
-    if not os.path.isfile(mdpfile):
+    if is_extxyz:
+        pass
+    elif not os.path.isfile(mdpfile):
         warnings.warn('Unable to find molecular dynamics parameters file: ' + mdpfile + ' (file not found).')
         pbc_on = True # If no MDP file found, assume PBC is on
     else:
@@ -290,16 +333,17 @@ def Check_Structures(WorkDir=None, Salt=None, SystemName=None, SaveTrajectory=Tr
             pbc_on = False
         
     # Load the trajectory and grab some basic info
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            t = md.Universe(grofile, trajfile, in_memory=InMemory)
-    except:
-        npz_file = os.path.join(WorkDir, '.' + SystemName + ".trr_offsets.npz")
-        os.remove(npz_file)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore')
-            t = md.Universe(grofile, trajfile)
+    if not is_extxyz:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                t = md.Universe(grofile, trajfile, in_memory=InMemory)
+        except:
+            npz_file = os.path.join(WorkDir, '.' + SystemName + ".trr_offsets.npz")
+            os.remove(npz_file)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')
+                t = md.Universe(grofile, trajfile)
     
     # Get the metal and halide
     if Salt is None:
@@ -314,7 +358,8 @@ def Check_Structures(WorkDir=None, Salt=None, SystemName=None, SaveTrajectory=Tr
     t.atoms = ag
     core_indeces = ag.indices
     
-    traj_timestep = (t.trajectory[-1].time - t.trajectory[0].time)/(t.trajectory.n_frames-1) # ps, time per trajectory frame
+    traj_timestep = ((t.trajectory[-1].time - t.trajectory[0].time) /
+                     max(t.trajectory.n_frames - 1, 1)) # ps, time per trajectory frame
     if StartPoint is None:
         min_time = t.trajectory[0].time  # ps
     else:

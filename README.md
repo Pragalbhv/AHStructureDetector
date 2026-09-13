@@ -20,7 +20,7 @@ Download the repository and install dependencies, then from within the repositor
 ## Using the `AHStructureDetector` Library
 This library contains two functions: `AHStructureDetector.Check_Structures` and `AHStructureDetector.Calculate_Liquid_Fraction`. Both work very similarly and neither have required inputs, but many optional inputs. `Check_Structures` is the main analysis tool while `Calculate_Liquid_Fraction` is intended for use when a global solid/liquid order parameter is required.
 
-`AHStructureDetector` functions are so far written only for use with [GROMACS](https://www.gromacs.org/) trajectory files. Analysis requires both a gromacs trajectory file (`*.trr`) and gromacs geometry input file (`*.gro` or `*.g96`) are present in the working directory (`WorkDir`) and both named identically (`SystemName`) besides the file extension. If the `g96` file type is used, make sure that `FileType='g96'` is set when using `AHStructureDetector` functions.
+`AHStructureDetector` supports [GROMACS](https://www.gromacs.org/) trajectories and extended XYZ (`*.extxyz`) trajectories. GROMACS analysis requires both a trajectory file (`*.trr`) and geometry input file (`*.gro` or `*.g96`) in `WorkDir`, named identically (`SystemName`) besides the extension. For extxyz, the single `SystemName.extxyz` file contains the trajectory and cell information; use `FileType='extxyz'`. Frame `Time` or `time` metadata is interpreted in ps, and otherwise frames are spaced by 1 ps.
 
 The simplest way to use a function is to is to move to the directory containing your GROMACS trajectory file and  geometry. Then in python  use
 ```python
